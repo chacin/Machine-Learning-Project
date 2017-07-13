@@ -1,0 +1,118 @@
+---
+title: "Final Project - Coursera Machine Learning Class"
+author: "Juan"
+date: "July, 2017"
+output: html_document
+---
+
+
+## Synopsis 
+A data-set containing accelerometer data from an array of different sensors was used to monitor how a few participants performed several different exercises (denoted as A, B, C, D or E). The objective of this report is to show whether that data can be used to predict what specific type of exercise the participants did. 
+
+## Preliminary data analysis
+
+Before any analysis was attempted, a quick visual review of the input data was made. This review showed that some of the columns were either sparsely populated or simply had no data at all. All these columns were purged from the data-set prior to the analysis. In addition, it seems that the variable *user_name* refers to the person assigned to do the exercise. If specific people were assigned to do specific exercises, then this variable would be a false predictor and should be not be used to train a model as it would lead to significant over-fitting. Since that would seem to defeat the purpose of the exercise, this variable was also ignored in the model training. The same is true for time stamp variables as this is not a longitudinal study. 
+There are two additional variables in the data-set whose meaning is not clear: **new_window** and **num_window**. The graph below attempts to plot the outcome variable **classe** against those two variables to see if a relationship can be inferred. The R code used is also shown. The first few lines of code are routine house-keeping tasks.
+
+```{r Read Data, fig.width=4.0, fig.align="center", message=FALSE, warning=FALSE}
+options(warn = -1)              # Suppress warnings
+library(ggplot2,quietly=TRUE)   # Load libraries and do some housekeeping
+library(caret); library(e1071); library(parallel); library(doParallel)
+cluster <- makeCluster(detectCores() - 1) # Use parallel processing but leave one core for OS
+registerDoParallel(cluster)
+
+# Read training and validation dataset and plot some predictors for analysis
+train <- read.csv("./pml-training.csv",header = TRUE, stringsAsFactors = TRUE)
+test <- read.csv("./pml-testing.csv",header = TRUE, stringsAsFactors = TRUE)
+featurePlot(x=train[,6:7], y=train$classe, plot="pairs", auto.key=list(columns=5))
+```
+
+As the figure shows by the random mixture of colors, there is no noticeable correlation between the window variables and the **classe** variable so, for modeling purposes, those two predictors are also ignored and only accelerometer data is used for model training. 
+
+Even after eliminating those variables as possible predictors, that still leaves 52 acceleration measurements to use during modeling which is a high number to carry in calculations. In order to see if that number can be reduced further, a couple of pre-modeling tests were done. The following lines of code check to see if any of those accelerations are zero (or near zero) or are missing altogether.
+
+```{r Near Zero and NA check, message=FALSE, warning=FALSE}
+cat("Number of near zero variables: ",sum(which(nearZeroVar(train[,8:59], saveMetrics = TRUE)[,4] == TRUE)), "\n") # Near Zero covariate check
+cat("Number of NA variables: ",sum(is.na(train[,8:60])), "\n") # Check for NA variables
+```
+
+Unfortunately, there are no **near zero** or **NA** variables that can be trimmed from the data-set. 
+
+## Model training and selection
+
+It is difficult to know a-priori which type of model will work well for a problem like this. Since the variable being predicted is a multi-level categorical, it is perhaps reasonable to assume that generalized linear models, in general, will not perform well. On the other hand, for a situation like this, models like a decision tree or a random forest would be good candidates. The following section evaluates those two models against each other and details how the final decision was made and what can be expected in terms of accuracy.
+
+The following lines break up the data into a training and a test sets. Ordinarily one would want the training set to use around 70% of the data but, in this case, the data set was too large for my computer to handle in a reasonable time so I allocated 50% of the data for training instead to try to alleviate the computational load. 
+
+```{r Data partition, message=FALSE, warning=FALSE}
+# Split data into training and validation data sets 
+set.seed(133)
+index <- createDataPartition(y=train$classe, p=0.5, list = FALSE)
+trainRed <- train[index,]
+testRed <- train[-index,]
+```
+
+In order to further reduce the number of predictors needed, the following lines of R code calculate the number and values for the principal components that account for or explain 85% of the variability in the data. 
+
+```{r Principal componet analysis, message=FALSE, warning=FALSE}
+preProc <- preProcess(trainRed[,8:59], method = "pca", thresh = 0.85)  # Principal component analysis
+cat("Number of principal componets needed = ", preProc$numComp, "\n")
+trainPC <- predict(preProc,trainRed[,8:59])
+testPC <- predict(preProc,testRed[,8:59])
+# Create a training and a validation (test) data sets with principal components
+trainPC <- cbind(trainPC, classe = trainRed$classe)
+testPC <- cbind(testPC, classe = testRed$classe)
+```
+
+The number of principal components needed to account for 85% of the variability in the outcome is 16 so that is a significant reduction from the original 52 accelerometer values. The two variables **trainPC** and **testPC** are then created to hold the data needed (principal components and results) for model training and validation cleanly. 
+
+With the training and validation data-sets ready, the following lines of code prepare the parameters needed for cross validation of the models. A k-fold strategy is used with 5 folds and 5 repeats. The variable **grid** holds a few parameters that are used to further try to reduce the workload needed for the random forest model since that one is computationally expensive.
+
+```{r Cross validation parameters, message=FALSE, warning=FALSE}
+# Parameters for cross validation
+fitControl <- trainControl(method = "repeatedcv", number = 5, repeats = 5, allowParallel = TRUE)
+grid <- expand.grid(mtry = c(7,12))
+```
+
+With the k-fold parameters set, the following lines perform the training and *in-sample* accuracy checks for the two different models evaluated: a decision tree model and a random forest model.
+
+```{r Model training and accuracy check, message=FALSE, warning=FALSE}
+# Train model  
+modelTree <- train(classe ~., data = trainPC, method = "rpart", trControl=fitControl)
+modelRF <- train(classe ~., data = trainPC, method = "rf", trControl=fitControl, tuneGrid=grid)
+# Summary of in-sample accuracy
+results <- resamples(list(Tree=modelTree, RF=modelRF))
+summary(results)
+bwplot(results)
+```
+
+From the table as well as the graph, it can be seen that the decision tree model performs very poorly. It attains an in-sample accuracy of just around 40% and an even lower kappa value of around 20%. The random forest model on the other hand performs much better with an in-sample accuracy around 90% and a similar high kappa value. 
+
+The random forest model is a clear winner for this report. 
+
+The following lines evaluate the accuracy of this random forest model now using the validation data
+
+```{r Validation accuracy check, message=FALSE, warning=FALSE}
+# Predict using test set and compare accuracy
+pred <- predict(modelRF,testPC)
+perf <- confusionMatrix(pred,testPC$classe)
+print(perf$table)
+print(perf$overall)
+```
+
+The random forest model was able to predict the **classe** variable on the validation data-set with a 96% accuracy which is a good result. 
+
+With that, the model was then applied to the final test data in the following code.
+
+```{r Final forecast, message=FALSE, warning=FALSE}
+# Final predictions for the test data
+finalPC <- predict(preProc,test[,8:59])    # Apply PCA to the test data
+finalPred <- predict(modelRF,finalPC)
+cat("Final predictions: ", as.character(finalPred), "\n")
+```
+
+All 20 of these predictions were correct. 
+
+## Conclusions
+
+A random forest model was used to predict what exercise type was performed based on a series of accelerometers measurements taken as the exercise was being performed. The random forest model proved to be very accurate in performing this task even if it was computationally heavy to complete. 
